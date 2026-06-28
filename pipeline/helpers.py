@@ -34,7 +34,7 @@ def prepare_run_dir(run_dir: Path, run_config: dict) -> Path:
 
 
 def run_agent_batch(run_config: dict, run_dir: Path) -> Path:
-    """Run mini-swe-agent batch script and return path to preds.json."""
+    """Run mini-swe-agent batch script and return path to preds.json. Used by evaluate_agent_local DAG only."""
     agent_out_dir = run_dir / "run-agent" 
     subprocess.run(
         [
@@ -61,7 +61,7 @@ def run_agent_batch(run_config: dict, run_dir: Path) -> Path:
 
 
 def run_swebench_eval(run_config: dict, preds_path: Path, run_dir: Path) -> Path:
-    """Run SWE-bench evaluation on predictions and return eval output dir."""
+    """Run SWE-bench evaluation on predictions and return eval output dir. Used by evaluate_agent_local DAG only."""
     eval_out_dir = run_dir / "run-eval"
     subprocess.run(
         [
@@ -124,7 +124,7 @@ def build_manifest(run_id: str, run_dir: Path, s3_uri: str = None) -> dict:
 def log_mlflow_run(run_config: dict, metrics: dict, artifact_uri: str, s3_uri: str = None) -> str:
     """Log run config, metrics, and artifact path to MLflow."""
     import mlflow
-    mlflow.set_tracking_uri(os.environ["ML_FLOW_URL"])
+    mlflow.set_tracking_uri(os.environ["MLFLOW_URL"])
     mlflow.set_experiment("evaluate_agent")
 
     with mlflow.start_run(run_name=run_config["run_id"]) as run:
@@ -154,3 +154,20 @@ def upload_run_to_s3(run_dir: Path, run_id: str) -> None:
             s3.upload_file(str(file_path), bucket, s3_key)
     
     return None
+
+
+def fix_preds_location(run_dir: Path) -> None:
+    """Move preds.json from trajectories/ up to run-agent/ if misplaced."""
+    agent_out_dir = run_dir / "run-agent"
+    misplaced = agent_out_dir / "trajectories" / "preds.json"
+    expected = agent_out_dir / "preds.json"
+    if misplaced.exists():
+        shutil.move(str(misplaced), str(expected))
+
+
+def fix_report_location(run_dir: Path, run_id: str) -> None:
+    """Move generated report into reports/ subfolder if misplaced."""
+    eval_out_dir = run_dir / "run-eval"
+    report_pattern = f"*.{run_id}.json"
+    for report_file in eval_out_dir.glob(report_pattern):
+        shutil.move(str(report_file), str(eval_out_dir / "reports" / report_file.name))

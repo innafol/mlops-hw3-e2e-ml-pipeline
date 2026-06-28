@@ -1,0 +1,74 @@
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+
+  airflow:
+    build: .
+    image: mlops-hw3-airflow
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+      minio:
+        condition: service_started
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: "/mlops-hw3-e2e-ml-pipeline/dags"
+      AIRFLOW__SIMPLE_AUTH_MANAGER__PASSWORDS: "admin:${AIRFLOW_ADMIN_PASSWORD}"
+      AIRFLOW__WEBSERVER__SECRET_KEY: "changeme"
+      MLFLOW_URL: http://mlflow:5000
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: ${S3_BUCKET}
+      NEBIUS_API_KEY: ${NEBIUS_API_KEY}
+      GIT_PYTHON_REFRESH: quiet      
+    volumes:
+      - ./dags:/mlops-hw3-e2e-ml-pipeline/dags
+      - ./pipeline:/mlops-hw3-e2e-ml-pipeline/pipeline
+      - ./scripts:/mlops-hw3-e2e-ml-pipeline/scripts
+      - ./runs:/mlops-hw3-e2e-ml-pipeline/runs
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8080:8080"
+    command: airflow standalone
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.1.0
+    environment:
+      MLFLOW_URL: http://mlflow:5000
+      MLFLOW_BACKEND_STORE_URI: sqlite:////mlflow-data/mlflow.db      
+    volumes:
+      - ./mlflow-data:/mlflow-data
+    ports:
+      - "5000:5000"
+    command: mlflow server --backend-store-uri sqlite:////mlflow-data/mlflow.db --host 0.0.0.0 --port 5000
+
+  minio:
+    image: minio/minio:latest
+    environment:
+      MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID}
+      MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    command: server /data --console-address ":9001"
+
+volumes:
+  postgres-data:
+  minio-data:
