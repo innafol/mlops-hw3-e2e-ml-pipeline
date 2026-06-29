@@ -33,6 +33,28 @@ def prepare_run_dir(run_dir: Path, run_config: dict) -> Path:
     return run_dir
 
 
+def fix_preds_location(run_dir: Path) -> Path:
+    """Move preds.json from trajectories/ up to run-agent/ if misplaced."""
+    agent_out_dir = run_dir / "run-agent"
+    misplaced = agent_out_dir / "trajectories" / "preds.json"
+    expected = agent_out_dir / "preds.json"
+    if misplaced.exists():
+        shutil.move(str(misplaced), str(expected))
+    return expected
+
+
+def fix_report_location(run_dir: Path, run_id: str) -> None:
+    """Move generated report into reports/ subfolder if misplaced.
+      This is a workaround for SWE-bench issue #449: report_dir CLI argument not working as expected in SWE-bench
+      This resolves bug in make_run_report() in reporting.py which writes the report to cwd instead of report_dir.
+    """
+    eval_out_dir = run_dir / "run-eval"
+    report_pattern = f"*.{run_id}.json"
+    for report_file in eval_out_dir.glob(report_pattern):
+        shutil.move(str(report_file), str(eval_out_dir / "reports" / report_file.name))
+    return None
+
+
 def run_agent_batch(run_config: dict, run_dir: Path) -> Path:
     """Run mini-swe-agent batch script and return path to preds.json. Used by evaluate_agent_local DAG only."""
     agent_out_dir = run_dir / "run-agent" 
@@ -52,11 +74,7 @@ def run_agent_batch(run_config: dict, run_dir: Path) -> Path:
         check=True,
     )
     # Post-execution fix: Pull preds.json out of trajectories up into run-agent
-    misplaced_preds = agent_out_dir / "trajectories" / "preds.json"
-    expected_preds = agent_out_dir / "preds.json"    
-    if misplaced_preds.exists():
-        shutil.move(str(misplaced_preds), str(expected_preds))
-        
+    expected_preds = fix_preds_location(run_dir)        
     return expected_preds
 
 
@@ -75,16 +93,8 @@ def run_swebench_eval(run_config: dict, preds_path: Path, run_dir: Path) -> Path
         cwd=str(eval_out_dir),
         check=True,
     )
-   
-    # Workaround for SWE-bench issue #449: report_dir CLI argument not working as expected in SWE-bench.
-    # Move the generated report into the reports/ subfolder manually.
-    report_pattern = f"*.{run_config['run_id']}.json"
-    generated_reports = list(eval_out_dir.glob(report_pattern))        
-    if generated_reports:
-        target_dir = eval_out_dir / "reports"
-        for report_file in generated_reports:
-            shutil.move(str(report_file), str(target_dir / report_file.name))
-
+    # Post-execution fix: move the generated report into the reports/ subfolder
+    fix_report_location(run_dir, run_config['run_id'])
     return eval_out_dir
 
 
@@ -156,18 +166,3 @@ def upload_run_to_s3(run_dir: Path, run_id: str) -> None:
     return None
 
 
-def fix_preds_location(run_dir: Path) -> None:
-    """Move preds.json from trajectories/ up to run-agent/ if misplaced."""
-    agent_out_dir = run_dir / "run-agent"
-    misplaced = agent_out_dir / "trajectories" / "preds.json"
-    expected = agent_out_dir / "preds.json"
-    if misplaced.exists():
-        shutil.move(str(misplaced), str(expected))
-
-
-def fix_report_location(run_dir: Path, run_id: str) -> None:
-    """Move generated report into reports/ subfolder if misplaced."""
-    eval_out_dir = run_dir / "run-eval"
-    report_pattern = f"*.{run_id}.json"
-    for report_file in eval_out_dir.glob(report_pattern):
-        shutil.move(str(report_file), str(eval_out_dir / "reports" / report_file.name))

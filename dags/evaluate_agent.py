@@ -22,7 +22,8 @@ from pipeline.helpers import (
 )
 
 RUNS_DIR = PROJECT_ROOT / "runs"
-HOST_PROJECT_ROOT = "/home/inna/mlops-hw3-e2e-ml-pipeline"
+HOST_PROJECT_ROOT = os.environ.get("HOST_PROJECT_ROOT", "")
+CONTAINER_WORKDIR = "/e2e-ml-pipeline"
 
 COMMON_ENV = {
     "NEBIUS_API_KEY": os.environ.get("NEBIUS_API_KEY", ""),
@@ -35,10 +36,10 @@ COMMON_ENV = {
 }
 
 COMMON_DOCKER = dict(
-    image="mlops-hw3-airflow",
+    image="mlops-airflow",
     mounts=[
         Mount(
-            target="/mlops-hw3-e2e-ml-pipeline/runs",
+            target=f"{CONTAINER_WORKDIR}/runs", 
             source=f"{HOST_PROJECT_ROOT}/runs",
             type="bind"
         ),
@@ -52,7 +53,7 @@ COMMON_DOCKER = dict(
     docker_url="unix://var/run/docker.sock",
     network_mode="host",
     auto_remove="success",
-    working_dir="/mlops-hw3-e2e-ml-pipeline",
+    working_dir=CONTAINER_WORKDIR,
     mount_tmp_dir=False,
 )
 
@@ -133,11 +134,11 @@ def evaluate_agent():
 
     run_eval = DockerOperator(
         task_id="run_eval",
-        command="""bash -c 'cd runs/{{ task_instance.xcom_pull(task_ids="prepare_run") }}/run-eval && \
-            bash /mlops-hw3-e2e-ml-pipeline/scripts/swe-bench-eval.sh \
+        command=f"""bash -c 'cd runs/{{{{ task_instance.xcom_pull(task_ids="prepare_run") }}}}/run-eval && \
+            bash {CONTAINER_WORKDIR}/scripts/swe-bench-eval.sh \
             ../run-agent/preds.json \
-            {{ params.workers }} \
-            {{ task_instance.xcom_pull(task_ids="prepare_run") }} \
+            {{{{ params.workers }}}} \
+            {{{{ task_instance.xcom_pull(task_ids="prepare_run") }}}} \
             reports'""",
         **COMMON_DOCKER,
     )
