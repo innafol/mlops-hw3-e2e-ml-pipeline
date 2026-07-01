@@ -2,8 +2,8 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import boto3
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -13,9 +13,10 @@ RUNS_DIR = PROJECT_ROOT / "runs"
 
 def build_run_config(params: dict, airflow_run_id: str) -> dict:
     """Build a run configuration dict from Airflow params and current_run_id."""
+    current_run_id = params.get("run_id") or airflow_run_id
     return {
         "airflow_run_id": airflow_run_id,
-        "run_id": re.sub(r'[^a-zA-Z0-9_.-]', '-', airflow_run_id),     #cleaned run id for folder names to resolve docker issue
+        "run_id": re.sub(r'[^a-zA-Z0-9_.-]', '-', current_run_id),     #cleaned run id for folder names to resolve docker issue
         "split": params["split"],
         "subset": params["subset"],
         "workers": params["workers"],
@@ -39,16 +40,6 @@ def prepare_run_dir(run_config: dict) -> Path:
     return run_dir
 
 
-def fix_preds_location(run_dir: Path) -> Path:
-    """Move preds.json from trajectories/ up to run-agent/ if misplaced."""
-    agent_out_dir = run_dir / "run-agent"
-    misplaced = agent_out_dir / "trajectories" / "preds.json"
-    expected = agent_out_dir / "preds.json"
-    if misplaced.exists():
-        shutil.move(str(misplaced), str(expected))
-    return expected
-
-
 def fix_report_location(run_dir: Path, run_id: str) -> None:
     """Move generated report into reports/ subfolder if misplaced.
       This is a workaround for SWE-bench issue #449: report_dir CLI argument not working as expected in SWE-bench
@@ -59,51 +50,6 @@ def fix_report_location(run_dir: Path, run_id: str) -> None:
     for report_file in eval_out_dir.glob(report_pattern):
         shutil.move(str(report_file), str(eval_out_dir / "reports" / report_file.name))
     return None
-
-
-def run_agent_batch(run_config: dict) -> Path:
-    """Run mini-swe-agent batch script and return path to preds.json. Used by evaluate_agent_local DAG only."""
-    run_dir = Path(run_config["run_dir"])
-    agent_out_dir = run_dir / "run-agent" 
-    subprocess.run(
-        [
-            "bash",
-            str(PROJECT_ROOT / "scripts" / "mini-swe-bench-batch.sh"),
-            run_config["split"],
-            run_config["subset"],
-            str(run_config["workers"]),
-            run_config["model"],
-            run_config["task_slice"],
-            str(agent_out_dir / "trajectories"),
-        ],
-        cwd=PROJECT_ROOT,
-        env={**os.environ, "MSWEA_COST_TRACKING": "ignore_errors"},
-        check=True,
-    )
-    # Post-execution fix: Pull preds.json out of trajectories up into run-agent
-    expected_preds = fix_preds_location(run_dir)        
-    return expected_preds
-
-
-def run_swebench_eval(run_config: dict, preds_path: Path) -> Path:
-    """Run SWE-bench evaluation on predictions and return eval output dir. Used by evaluate_agent_local DAG only."""
-    run_dir = Path(run_config["run_dir"])
-    eval_out_dir = run_dir / "run-eval"
-    subprocess.run(
-        [
-            "bash",
-            str(PROJECT_ROOT / "scripts" / "swe-bench-eval.sh"),
-            str(preds_path),
-            str(run_config["workers"]),
-            run_config["run_id"],
-            str(eval_out_dir / "reports"),        # bug in make_run_report() in reporting.py: writes the report to cwd instead of report_dir.
-        ],
-        cwd=str(eval_out_dir),
-        check=True,
-    )
-    # Post-execution fix: move the generated report into the reports/ subfolder
-    fix_report_location(run_dir, run_config['run_id'])
-    return eval_out_dir
 
 
 def collect_metrics(eval_dir: Path) -> dict:
@@ -126,7 +72,7 @@ def collect_metrics(eval_dir: Path) -> dict:
         "total_instances": report.get("total_instances", 0),
         "resolve_rate": report.get("resolved_instances", 0) / max(report.get("submitted_instances", 1), 1),
         "error_rate": report.get("error_instances", 0) / max(report.get("submitted_instances", 1), 1),
-        "completion_rate": report.get("completed_instances", 0) / max(report.get("submitted_instances", 1), 1),
+        "completion_rate": report.get("completed_instances", 0) / max(report.get("total_instances", 1), 1),
     }
 
 
@@ -134,13 +80,12 @@ def build_manifest(run_id: str, run_dir: Path, s3_uri: str = None) -> dict:
     """Build manifest dictionary pointing to all run artifacts."""
     return {
         "run_id": run_id,
-        "artifact_path": str(run_dir),
-        "config": str(run_dir / "config.json"),
-        "metrics": str(run_dir / "metrics.json"),
-        "predictions": str(run_dir / "run-agent" / "preds.json"),
-        "trajectories": str(run_dir / "run-agent" / "trajectories"),
-        "logs": str(run_dir / "run-eval" / "logs"),
-        "reports": str(run_dir / "run-eval" / "reports"),
+        "config": "config.json",
+        "metrics": "metrics.json",
+        "predictions": "run-agent/preds.json",
+        "trajectories": "run-agent/trajectories",
+        "logs": "run-eval/logs",
+        "reports": "run-eval/reports",
         "s3_uri": s3_uri,
     }
 
@@ -161,7 +106,7 @@ def log_mlflow_run(run_config: dict, metrics: dict, artifact_uri: str, s3_uri: s
 
 
 def upload_run_to_s3(run_dir: Path, run_id: str) -> None:
-    """Upload run directory to S3/MinIO."""
+    """Upload run directory to S3/MinIO, with retry on transient failures."""
     bucket = os.environ["S3_BUCKET"]
     endpoint_url = os.environ["S3_ENDPOINT_URL"]
     
@@ -172,9 +117,21 @@ def upload_run_to_s3(run_dir: Path, run_id: str) -> None:
         aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
     )
     
-    for file_path in run_dir.rglob("*"):
-        if file_path.is_file():
-            s3_key = f"{run_id}/{file_path.relative_to(run_dir)}"
-            s3.upload_file(str(file_path), bucket, s3_key)
+    files = [f for f in run_dir.rglob("*") if f.is_file()]    
+    for file_path in files:
+        s3_key = f"{run_id}/{file_path.relative_to(run_dir)}"
+        attempt = 0
+        delay = 5
+        while True:
+            try:
+                s3.upload_file(str(file_path), bucket, s3_key)
+                break
+            except Exception as e:
+                attempt += 1
+                if attempt == 3:
+                    raise
+                print(f"Upload failed for {s3_key} (attempt {attempt}/3): {e}. Retrying in {delay}s...")
+                time.sleep(delay)
+                delay *= 2
     
     return None
