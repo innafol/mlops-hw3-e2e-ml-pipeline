@@ -76,17 +76,18 @@ def evaluate_agent():
 
     @task
     def prepare_run(params, dag_run) -> str:
-        current_run_id = dag_run.run_id
-        run_dir = RUNS_DIR / current_run_id
-        run_config = build_run_config(params, current_run_id)
-        prepare_run_dir(run_dir, run_config)
-        return current_run_id
+        run_config = build_run_config(params, dag_run.run_id)
+        run_dir = prepare_run_dir(run_config)
+        run_config["run_dir"] = str(run_dir)
+        return run_config["run_id"]
 
     @task
     def summarize_and_log(current_run_id: str, params, dag_run) -> None:
         run_dir = RUNS_DIR / current_run_id
-        run_config = build_run_config(params, current_run_id)
         eval_dir = run_dir / "run-eval"
+        
+        with open(run_dir / "config.json") as f:
+            run_config = json.load(f)
 
         fix_report_location(run_dir, current_run_id)
         metrics = collect_metrics(eval_dir)
@@ -110,11 +111,14 @@ def evaluate_agent():
                     json.dump(manifest, f, indent=2)
 
         log_mlflow_run(run_config, metrics, str(run_dir), s3_uri)
+        return None
 
 
     @task
     def fix_preds(current_run_id: str) -> None:
-        fix_preds_location(RUNS_DIR / current_run_id)
+        run_dir = RUNS_DIR / current_run_id
+        preds_path = fix_preds_location(run_dir)
+        return str(preds_path)
 
 
     # Pipeline

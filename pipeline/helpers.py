@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import subprocess
 import boto3
@@ -7,11 +8,14 @@ from pathlib import Path
 from datetime import datetime
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+RUNS_DIR = PROJECT_ROOT / "runs"
 
-def build_run_config(params: dict, current_run_id: str) -> dict:
+
+def build_run_config(params: dict, airflow_run_id: str) -> dict:
     """Build a run configuration dict from Airflow params and current_run_id."""
     return {
-        "run_id": current_run_id,  # Keep the JSON payload key as 'run_id' for your scripts
+        "airflow_run_id": airflow_run_id,
+        "run_id": re.sub(r'[^a-zA-Z0-9_.-]', '-', airflow_run_id),     #cleaned run id for folder names to resolve docker issue
         "split": params["split"],
         "subset": params["subset"],
         "workers": params["workers"],
@@ -22,8 +26,10 @@ def build_run_config(params: dict, current_run_id: str) -> dict:
     }
 
 
-def prepare_run_dir(run_dir: Path, run_config: dict) -> Path:
+def prepare_run_dir(run_config: dict) -> Path:
     """Create the run directory structure and write config.json."""
+    current_run_id = run_config["run_id"]
+    run_dir = RUNS_DIR / current_run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "run-agent").mkdir(exist_ok=True)
     (run_dir / "run-eval" / "logs").mkdir(parents=True, exist_ok=True)
@@ -55,8 +61,9 @@ def fix_report_location(run_dir: Path, run_id: str) -> None:
     return None
 
 
-def run_agent_batch(run_config: dict, run_dir: Path) -> Path:
+def run_agent_batch(run_config: dict) -> Path:
     """Run mini-swe-agent batch script and return path to preds.json. Used by evaluate_agent_local DAG only."""
+    run_dir = Path(run_config["run_dir"])
     agent_out_dir = run_dir / "run-agent" 
     subprocess.run(
         [
@@ -78,8 +85,9 @@ def run_agent_batch(run_config: dict, run_dir: Path) -> Path:
     return expected_preds
 
 
-def run_swebench_eval(run_config: dict, preds_path: Path, run_dir: Path) -> Path:
+def run_swebench_eval(run_config: dict, preds_path: Path) -> Path:
     """Run SWE-bench evaluation on predictions and return eval output dir. Used by evaluate_agent_local DAG only."""
+    run_dir = Path(run_config["run_dir"])
     eval_out_dir = run_dir / "run-eval"
     subprocess.run(
         [
@@ -111,8 +119,14 @@ def collect_metrics(eval_dir: Path) -> dict:
     return {
         "resolved_instances": report.get("resolved_instances", 0),
         "submitted_instances": report.get("submitted_instances", 0),
+        "completed_instances": report.get("completed_instances", 0),
+        "unresolved_instances": report.get("unresolved_instances", 0),
+        "empty_patch_instances": report.get("empty_patch_instances", 0),
+        "error_instances": report.get("error_instances", 0),
         "total_instances": report.get("total_instances", 0),
         "resolve_rate": report.get("resolved_instances", 0) / max(report.get("submitted_instances", 1), 1),
+        "error_rate": report.get("error_instances", 0) / max(report.get("submitted_instances", 1), 1),
+        "completion_rate": report.get("completed_instances", 0) / max(report.get("submitted_instances", 1), 1),
     }
 
 
@@ -164,5 +178,3 @@ def upload_run_to_s3(run_dir: Path, run_id: str) -> None:
             s3.upload_file(str(file_path), bucket, s3_key)
     
     return None
-
-
